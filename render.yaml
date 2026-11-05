@@ -1,0 +1,19 @@
+# Blueprint для Render (render.com): «New → Blueprint» → выбрать этот репозиторий.
+services:
+  - type: web
+    name: beamng-radio-stations
+    runtime: python
+    plan: starter                # постоянный диск доступен только на платных планах
+    startCommand: "python server/app.py"
+    healthCheckPath: /healthz
+    envVars:
+      - key: PYTHON_VERSION
+        value: "3.12.7"
+      - key: ADMIN_TOKEN
+        generateValue: true          # Render сгенерирует секрет; посмотрите его в Environment
+      - key: DATA_FILE
+        value: /var/data/stations.json
+disks:
+  - name: station-data
+    mountPath: /var/data
+    sizeGB: 1

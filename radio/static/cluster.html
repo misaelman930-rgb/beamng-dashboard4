@@ -1,0 +1,407 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<title>BeamNG Cluster</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  html, body {
+    width: 100%; height: 100%;
+    background: #000;
+    overflow: hidden;
+    font-family: system-ui, -apple-system, sans-serif;
+    touch-action: manipulation;
+    -webkit-user-select: none;
+    user-select: none;
+  }
+  #c { display: block; width: 100vw; height: 100vh; }
+  /* Управление — в правом верхнем углу, чтобы не закрывать полосу индикаторов внизу */
+  .bar {
+    position: fixed; top: 6px; right: 8px; bottom: auto; left: auto;
+    display: flex; align-items: center; gap: 8px; padding: 0;
+    background: none; z-index: 2;
+  }
+  .bar button {
+    width: 40px; height: 40px; border-radius: 50%;
+    border: 1px solid #333; background: #1a1a1a;
+    color: #ddd; font-size: 14px;
+  }
+  .bar button.play {
+    width: 46px; height: 46px;
+    background: #c62828; border: none; color: #fff; font-weight: 700;
+  }
+  .bar .st { display: none; }   /* название станции уже в карточке внизу */
+  .conn {
+    position: fixed; top: 8px; left: 10px;
+    font-size: 11px; color: #555; z-index: 2;
+  }
+  .conn.on { color: #4caf50; }
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<div class="conn" id="conn">…</div>
+<div class="bar">
+  <button type="button" onclick="cmd('prev')">⏮</button>
+  <button type="button" class="play" id="btnPlay" onclick="cmd('play')">▶</button>
+  <button type="button" onclick="cmd('next')">⏭</button>
+  <span class="st" id="stName">—</span>
+</div>
+<script>
+const canvas = document.getElementById('c');
+const ctx = canvas && canvas.getContext ? canvas.getContext('2d') : null;
+if (!ctx) { location.replace('/digital'); }   // браузер без canvas — цифровой вид
+let W = 0, H = 0, dpr = 1;
+let state = {
+  connected: false, speed: 0, rpm: 0, gear: 1, fuel: 0.5, temp: 80,
+  station: '—', playing: false, lights: {},
+  scale: { max_kmh: 200, max_rpm: 7000 }, track: ''
+};
+let sSpeed = 0, sRpm = 0, sFuel = 0.5, sTemp = 0.4;
+
+function resize() {
+  dpr = Math.min(window.devicePixelRatio || 1, 2);
+  W = window.innerWidth;
+  H = window.innerHeight;
+  canvas.width = W * dpr;
+  canvas.height = H * dpr;
+  canvas.style.width = W + 'px';
+  canvas.style.height = H + 'px';
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+}
+window.addEventListener('resize', resize);
+resize();
+
+function lerp(a, b, t) { return a + (b - a) * t; }
+
+function needle(cx, cy, r, angle, color, lenScale) {
+  const len = r * (lenScale || 0.78);
+  const x = cx + Math.cos(angle) * len;
+  const y = cy + Math.sin(angle) * len;
+  ctx.save();
+  ctx.strokeStyle = color;
+  ctx.lineWidth = Math.max(2.5, r * 0.028);
+  ctx.lineCap = 'round';
+  ctx.beginPath();
+  ctx.moveTo(cx - Math.cos(angle) * r * 0.14, cy - Math.sin(angle) * r * 0.14);
+  ctx.lineTo(x, y);
+  ctx.stroke();
+  ctx.beginPath();
+  ctx.arc(cx, cy, r * 0.09, 0, Math.PI * 2);
+  ctx.fillStyle = '#1a1a1a';
+  ctx.fill();
+  ctx.beginPath();
+  ctx.arc(cx, cy, r * 0.05, 0, Math.PI * 2);
+  ctx.fillStyle = color;
+  ctx.fill();
+  ctx.restore();
+}
+
+function drawDial(cx, cy, r, opts) {
+  const min = opts.min || 0, max = opts.max || 100, value = opts.value || 0;
+  const startAng = opts.startAng != null ? opts.startAng : Math.PI * 0.75;
+  const endAng = opts.endAng != null ? opts.endAng : Math.PI * 2.25;
+  const major = opts.major || 10, minor = opts.minor || 2;
+  const redFrom = opts.redFrom;
+  const unit = opts.unit || '';
+  const format = opts.format || (v => String(Math.round(v)));
+
+  const g = ctx.createRadialGradient(cx, cy, r * 0.05, cx, cy, r);
+  g.addColorStop(0, '#2c2c2c');
+  g.addColorStop(0.65, '#1c1c1c');
+  g.addColorStop(1, '#0a0a0a');
+  ctx.beginPath();
+  ctx.arc(cx, cy, r, 0, Math.PI * 2);
+  ctx.fillStyle = g;
+  ctx.fill();
+  ctx.lineWidth = 2;
+  ctx.strokeStyle = '#444';
+  ctx.stroke();
+
+  // bezel
+  ctx.beginPath();
+  ctx.arc(cx, cy, r * 0.97, 0, Math.PI * 2);
+  ctx.strokeStyle = '#111';
+  ctx.lineWidth = r * 0.035;
+  ctx.stroke();
+
+  const span = endAng - startAng;
+  const range = max - min;
+
+  if (redFrom != null) {
+    const a0 = startAng + ((redFrom - min) / range) * span;
+    ctx.beginPath();
+    ctx.arc(cx, cy, r * 0.86, a0, endAng);
+    ctx.strokeStyle = '#d32f2f';
+    ctx.lineWidth = r * 0.07;
+    ctx.lineCap = 'butt';
+    ctx.stroke();
+  }
+
+  for (let v = min; v <= max + 0.001; v += minor) {
+    const t = (v - min) / range;
+    const a = startAng + t * span;
+    const isMajor = Math.abs((v / major) - Math.round(v / major)) < 0.001;
+    const r0 = isMajor ? r * 0.70 : r * 0.78;
+    const r1 = r * 0.88;
+    ctx.beginPath();
+    ctx.moveTo(cx + Math.cos(a) * r0, cy + Math.sin(a) * r0);
+    ctx.lineTo(cx + Math.cos(a) * r1, cy + Math.sin(a) * r1);
+    ctx.strokeStyle = isMajor ? '#eee' : '#777';
+    ctx.lineWidth = isMajor ? 2.2 : 1;
+    ctx.stroke();
+    if (isMajor) {
+      const tx = cx + Math.cos(a) * r * 0.58;
+      const ty = cy + Math.sin(a) * r * 0.58;
+      ctx.fillStyle = '#e8e8e8';
+      ctx.font = '600 ' + Math.round(r * 0.12) + 'px system-ui,sans-serif';
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.fillText(format(v), tx, ty);
+    }
+  }
+
+  if (unit) {
+    ctx.fillStyle = '#999';
+    ctx.font = Math.round(r * 0.085) + 'px system-ui';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillText(unit, cx, cy + r * 0.48);
+  }
+
+  const clamped = Math.max(min, Math.min(max, value));
+  const ang = startAng + ((clamped - min) / range) * span;
+  needle(cx, cy, r, ang, '#ff1744', 0.84);
+}
+
+function drawSmall(cx, cy, r, value01, leftLabel, rightLabel, caption) {
+  const a0 = Math.PI * 1.15;
+  const a1 = Math.PI * 1.85;
+  const span = a1 - a0;
+
+  const g = ctx.createRadialGradient(cx, cy, r * 0.15, cx, cy, r);
+  g.addColorStop(0, '#252525');
+  g.addColorStop(1, '#0e0e0e');
+  ctx.beginPath();
+  ctx.arc(cx, cy, r, 0, Math.PI * 2);
+  ctx.fillStyle = g;
+  ctx.fill();
+  ctx.strokeStyle = '#333';
+  ctx.lineWidth = 1.5;
+  ctx.stroke();
+
+  for (let i = 0; i <= 4; i++) {
+    const a = a0 + (i / 4) * span;
+    const r0 = r * 0.72, r1 = r * 0.88;
+    ctx.beginPath();
+    ctx.moveTo(cx + Math.cos(a) * r0, cy + Math.sin(a) * r0);
+    ctx.lineTo(cx + Math.cos(a) * r1, cy + Math.sin(a) * r1);
+    ctx.strokeStyle = '#ccc';
+    ctx.lineWidth = (i === 0 || i === 4) ? 2 : 1;
+    ctx.stroke();
+  }
+
+  ctx.fillStyle = '#bbb';
+  ctx.font = Math.round(r * 0.18) + 'px system-ui';
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  ctx.fillText(leftLabel, cx + Math.cos(a0) * r * 0.52, cy + Math.sin(a0) * r * 0.52);
+  ctx.fillText(rightLabel, cx + Math.cos(a1) * r * 0.52, cy + Math.sin(a1) * r * 0.52);
+
+  ctx.fillStyle = '#888';
+  ctx.font = Math.round(r * 0.13) + 'px system-ui';
+  ctx.fillText(caption, cx, cy + r * 0.32);
+
+  const ang = a0 + Math.max(0, Math.min(1, value01)) * span;
+  needle(cx, cy, r, ang, '#ff1744', 0.72);
+}
+
+function drawLights(x, y, w, h, lights) {
+  // Порядок и цвета — как на приборной панели с фото.
+  // Лампы без данных в OutGauge (насос, дверь, ремень, check engine, airbag) остаются тёмными.
+  const items = [
+    { key: 'pump', text: 'PUMP', c: '#ff1744' },
+    { key: 'door', text: 'CAR', c: '#ffc107' },
+    { key: 'handbrake', text: 'BRAKE', c: '#ff1744' },
+    { key: 'battery', text: 'BAT', c: '#ff1744' },
+    { key: 'belt', text: 'BELT', c: '#ff1744' },
+    { key: 'oil', text: 'OIL', c: '#ff1744' },
+    { key: 'fuel_low', text: 'FUEL', c: '#ffc107' },
+    { key: 'check', text: 'CHECK', c: '#ffc107' },
+    { key: 'abs', text: 'ABS', c: '#ffc107' },
+    { key: 'tc', text: 'TC', c: '#ffc107' },
+    { key: 'airbag', text: 'AIR BAG', c: '#ff1744' },
+    { key: 'beam', text: 'BEAM', c: '#40c4ff' }
+  ];
+  const n = items.length;
+  const bw = w / n;
+  items.forEach(function (it, i) {
+    const on = !!lights[it.key];
+    const cx = x + i * bw + bw / 2;
+    ctx.fillStyle = on ? it.c : '#2a2a2a';
+    ctx.font = 'bold ' + Math.max(9, Math.round(Math.min(h * 0.42, bw * 0.2))) + 'px system-ui';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.globalAlpha = on ? 1 : 0.55;
+    ctx.fillText(it.text, cx, y + h / 2);
+    ctx.globalAlpha = 1;
+  });
+}
+
+function fitText(text, maxW) {
+  if (ctx.measureText(text).width <= maxW) return text;
+  let t = text;
+  while (t.length > 1 && ctx.measureText(t + '…').width > maxW) t = t.slice(0, -1);
+  return t + '…';
+}
+
+function drawCard(x, y, w, h, station, track) {
+  ctx.fillStyle = '#0b0e12';
+  ctx.fillRect(x, y, w, h);
+  ctx.strokeStyle = '#2a2f37';
+  ctx.lineWidth = 1.5;
+  ctx.strokeRect(x, y, w, h);
+  const pad = w * 0.05;
+  ctx.textAlign = 'left';
+  ctx.textBaseline = 'middle';
+  ctx.font = 'bold ' + Math.round(h * 0.34) + 'px system-ui';
+  ctx.fillStyle = '#ffb020';
+  ctx.fillText(fitText(station || '—', w - 2 * pad), x + pad, y + h * 0.3);
+  ctx.font = Math.round(h * 0.26) + 'px system-ui';
+  ctx.fillStyle = '#9aa3ad';
+  ctx.fillText(fitText(track || '', w - 2 * pad), x + pad, y + h * 0.72);
+  ctx.textAlign = 'center';
+}
+
+function drawOdo(cx, cy) {
+  const s = String(Math.floor(sSpeed * 12) % 1000000).padStart(6, '0');
+  const w = 96, h = 24;
+  ctx.fillStyle = '#050505';
+  ctx.fillRect(cx - w / 2, cy - h / 2, w, h);
+  ctx.strokeStyle = '#333';
+  ctx.strokeRect(cx - w / 2, cy - h / 2, w, h);
+  ctx.fillStyle = '#cfd8dc';
+  ctx.font = '600 15px monospace';
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  ctx.fillText(s, cx, cy + 1);
+}
+
+function frame() {
+  sSpeed = lerp(sSpeed, state.speed, 0.18);
+  sRpm = lerp(sRpm, state.rpm, 0.14);
+  sFuel = lerp(sFuel, state.fuel, 0.1);
+  sTemp = lerp(sTemp, Math.min(1, Math.max(0, (state.temp - 50) / 70)), 0.1);
+
+  ctx.fillStyle = '#000';
+  ctx.fillRect(0, 0, W, H);
+
+  // Раскладка: приборы сверху, полоса индикаторов и карточка станции внизу
+  const stripH = Math.max(26, H * 0.07);
+  const stripY = H - stripH - 14;
+  const top = H * 0.05, bottom = stripY - 12;
+  const midY = (top + bottom) / 2;
+  // Радиус ограничен и высотой, и шириной: шкалы оборотов и скорости не должны налезать друг на друга
+  const speedR = Math.min(W * 0.16, (bottom - top) / 2.05);
+  const rpmR = speedR * 0.84;
+  const smallR = speedR * 0.40;
+
+  const cxSpeed = W * 0.50;
+  const cxRpm = W * 0.20;
+  const cxFuel = W * 0.78;
+  const cxTemp = W * 0.91;
+
+  const rMax = state.scale.max_rpm / 1000;
+  drawDial(cxRpm, midY, rpmR, {
+    min: 0, max: rMax, value: sRpm / 1000,
+    major: 1, minor: 0.5, redFrom: rMax * 0.85, unit: 'x1000 rpm'
+  });
+
+  const sMax = state.scale.max_kmh;
+  drawDial(cxSpeed, midY, speedR, {
+    min: 0, max: sMax, value: sSpeed,
+    major: sMax > 240 ? 40 : 20, minor: sMax > 240 ? 10 : 10, unit: 'km/h'
+  });
+
+  const gearMap = { 0: 'R', 1: 'N' };
+  const gtxt = gearMap[state.gear] != null ? gearMap[state.gear] : String(Math.max(1, state.gear - 1));
+  ctx.fillStyle = '#4fc3f7';
+  ctx.font = '700 ' + Math.round(speedR * 0.24) + 'px system-ui';
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  ctx.fillText(gtxt, cxSpeed, midY - speedR * 0.06);
+
+  drawOdo(cxSpeed, midY + speedR * 0.30);
+
+  drawSmall(cxFuel, midY - smallR * 0.2, smallR, sFuel, 'E', 'F', 'FUEL');
+  drawSmall(cxTemp, midY + smallR * 1.05, smallR * 0.9, sTemp, 'C', 'H', 'TEMP');
+
+  ctx.font = Math.round(speedR * 0.15) + 'px system-ui';
+  ctx.textAlign = 'center';
+  ctx.fillStyle = state.lights.signal_l ? '#00e676' : '#1a1a1a';
+  ctx.fillText('◀', cxSpeed - speedR * 0.55, midY - speedR * 0.98);
+  ctx.fillStyle = state.lights.signal_r ? '#00e676' : '#1a1a1a';
+  ctx.fillText('▶', cxSpeed + speedR * 0.55, midY - speedR * 0.98);
+
+  // Полоса индикаторов внизу, карточка станции справа от неё
+  const stripW = W * 0.62;
+  drawLights(W * 0.04, stripY, stripW, stripH, state.lights);
+  const cardX = W * 0.04 + stripW + 14;
+  const cardW = W * 0.96 - cardX;
+  const cardH = stripH * 2;
+  drawCard(cardX, stripY + stripH - cardH, cardW, cardH, state.station, state.track);
+
+  requestAnimationFrame(frame);
+}
+requestAnimationFrame(frame);
+
+function update(d) {
+  state.connected = !!d.connected;
+  const t = d.telemetry || {};
+  state.speed = t.speed_kmh || 0;
+  state.rpm = t.rpm || 0;
+  state.gear = t.gear != null ? t.gear : 1;
+  state.fuel = t.fuel != null ? t.fuel : 0.5;
+  state.temp = t.engine_temp != null ? t.engine_temp : 80;
+  state.station = d.station || '—';
+  state.track = d.track || '';
+  state.scale = d.scale || state.scale;
+  state.playing = !!d.playing;
+  state.lights = {
+    handbrake: !!(t.handbrake || t.brake > 0.85),
+    battery: !!t.battery,
+    oil: !!t.oil,
+    fuel_low: state.fuel < 0.15,
+    tc: !!t.tc,
+    abs: !!t.abs,
+    beam: !!t.fullbeam,
+    signal_l: !!t.signal_left,
+    signal_r: !!t.signal_right
+  };
+  document.getElementById('conn').textContent = state.connected ? '● Connected' : '○ Waiting for game';
+  document.getElementById('conn').className = 'conn' + (state.connected ? ' on' : '');
+  document.getElementById('stName').textContent = state.station;
+  document.getElementById('btnPlay').textContent = state.playing ? '❚❚' : '▶';
+}
+
+function poll() {
+  fetch('/api/state').then(function (r) { return r.json(); }).then(update).catch(function () {
+    document.getElementById('conn').textContent = '○ No PC connection';
+    document.getElementById('conn').className = 'conn';
+  });
+}
+function cmd(action) {
+  fetch('/api/cmd', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ action: action })
+  }).then(function () { setTimeout(poll, 120); });
+}
+poll();
+setInterval(poll, 150);
+</script>
+</body>
+</html>
